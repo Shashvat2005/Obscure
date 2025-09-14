@@ -4,6 +4,24 @@ import 'dart:convert';
 import 'dart:typed_data';
 import 'package:image/image.dart' as img;
 import 'package:crypto/crypto.dart' as crypto;
+import 'dart:async';
+
+
+Future<void> jumbleWrapper(Map<String, String> args) async {
+  final inPath = args['in']!;
+  final outPath = args['out']!;
+  final key = args['key']!;
+  final j = JumblePixels();
+  await j.jumbleImage(inPath, outPath, key);
+}
+
+Future<void> unjumbleWrapper(Map<String, String> args) async {
+  final inPath = args['in']!;
+  final outPath = args['out']!;
+  final key = args['key']!;
+  final j = JumblePixels();
+  await j.unjumbleImage(inPath, outPath, key);
+}
 
 class ImageCeaserEncryptor {
   static const markerR = 123;

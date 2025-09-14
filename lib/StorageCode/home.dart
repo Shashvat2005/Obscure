@@ -744,24 +744,13 @@ class _HomePageState extends State<HomePage>
                             ),
                           ],
                         ),
-                        // child: TabBar(
-                        //   controller: _tabController,
-                        //   labelStyle: const TextStyle(fontWeight: FontWeight.w600),
-                        //   tabs: [
-                        //     Tab(text: "Original Images"),
-                        //     Tab(text: "Encrypted Images"),
-                        //   ],
-                        // ),
-                        child: IgnorePointer(
-                          ignoring: isSelecting,
-                          child: TabBar(
-                            controller: _tabController,
-                            labelStyle: const TextStyle(fontWeight: FontWeight.w600),
-                            tabs: [
-                              Tab(text: "Original Images"),
-                              Tab(text: "Encrypted Images"),
-                            ],
-                          ),
+                        child: TabBar(
+                          controller: _tabController,
+                          labelStyle: const TextStyle(fontWeight: FontWeight.w600),
+                          tabs: [
+                            Tab(text: "Original Images"),
+                            Tab(text: "Encrypted Images"),
+                          ],
                         ),
                       ),
                   
@@ -769,9 +758,6 @@ class _HomePageState extends State<HomePage>
                       Expanded(
                         child: TabBarView(
                           controller: _tabController,
-                          physics: isSelecting
-                              ? const NeverScrollableScrollPhysics()
-                              : null,
                           children: [
                             // Original Images Tab
                             _buildImageGrid(
