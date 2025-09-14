@@ -17,35 +17,47 @@ class _HomePageState extends State<HomePage>
     with SingleTickerProviderStateMixin {
   final db = DatabaseHelper();
   final jpe = JumblePixels();
+
   List<String> folderPaths = [];
   List<String> bookmarkList = [];
   List<String> keys = [];
   List<File> originalImages = [];
   List<File> encryptedImages = [];
+
   String folderName = "";
+
   late TabController _tabController;
+
   int imgCount = 0;
   int orgImages = 0;
   int encImages = 0;
+
   bool checking = false;
+
   String currentKey = "";
+  String currentBookmark = "";
+  String currentPath = "";
 
   String getRandomString(int length) {
-    String _chars =
+    String chars =
         'AaBbCcDdEeFfGgHhIiJjKkLlMmNnOoPpQqRrSsTtUuVvWwXxYyZz1234567890';
-    Random _rnd = Random();
+    Random rnd = Random();
     return String.fromCharCodes(Iterable.generate(
-        length, (_) => _chars.codeUnitAt(_rnd.nextInt(_chars.length))));
+        length, (_) => chars.codeUnitAt(rnd.nextInt(chars.length))));
   }
 
   // Multi-select functionality
   bool isSelecting = false;
-  Set<File> selectedImages = Set<File>();
+  Set<File> selectedImages = <File>{};
 
   @override
   void initState() {
     super.initState();
     _tabController = TabController(length: 2, vsync: this);
+    _tabController.addListener(() {
+      // Rebuild on tab change to update actions/labels
+      setState(() {});
+    });
     loadFolder();
     //db.deleteDb();
     //db.deleteAllRecords();
@@ -58,6 +70,7 @@ class _HomePageState extends State<HomePage>
   }
 
   Future<void> loadFolder() async {
+    print("loadFolder is called");
     final folders = await db.getAllRecords();
     folderPaths.clear();
     bookmarkList.clear();
@@ -96,6 +109,7 @@ class _HomePageState extends State<HomePage>
   }
 
   Future<void> pickFolder() async {
+    print("pickFolder is called");
     try {
       final key = getRandomString(10);
 
@@ -136,6 +150,7 @@ class _HomePageState extends State<HomePage>
   }
 
   Future<void> deleteFolder(String path) async {
+    print("deleteFolder is called");
     await db.deleteRecordByFilePath(path);
     setState(() {
       folderPaths.remove(path);
@@ -146,35 +161,38 @@ class _HomePageState extends State<HomePage>
 
   Future<void> loadImagesFromFolder(
       String path, String bookmark, String key) async {
+    print("loadImagesFromFolder is called");
     setState(() {
       currentKey = key;
       checking = true;
+      originalImages = [];
+      encryptedImages = [];
     });
-    print("Loading images for: $path");
+    //print("Loading images for: $path");
 
     try {
       String finalPath = path;
-      print("Platform: ${Platform.isMacOS}");
-      print("Bookmark: ${bookmark.isNotEmpty}");
-      print("Condition: ${Platform.isMacOS && bookmark.isNotEmpty}");
+      // print("Platform: ${Platform.isMacOS}");
+      // print("Bookmark: ${bookmark.isNotEmpty}");
+      // print("Condition: ${Platform.isMacOS && bookmark.isNotEmpty}");
 
       if (Platform.isMacOS && bookmark.isNotEmpty) {
         try {
           FileSystemEntity resolved =
               await SecureBookmarks().resolveBookmark(bookmark);
           finalPath = resolved.path; // get actual usable path
-          print("Resolved bookmark → $finalPath");
+          //print("Resolved bookmark → $finalPath");
           await SecureBookmarks()
               .startAccessingSecurityScopedResource(resolved);
         } catch (e) {
-          print("Bookmark resolution failed, fallback to original path: $e");
+          //rint("Bookmark resolution failed, fallback to original path: $e");
           finalPath = path;
         }
       }
 
       final dir = Directory(finalPath);
       if (!await dir.exists()) {
-        print("Directory does not exist: $finalPath");
+        //print("Directory does not exist: $finalPath");
         setState(() {
           originalImages = [];
           encryptedImages = [];
@@ -193,7 +211,9 @@ class _HomePageState extends State<HomePage>
 
       files.sort((a, b) => a.path.compareTo(b.path));
       for (var file in files) {
-        if (await jpe.isJumbled(file)) {
+        bool a = await jpe.isJumbled(file);
+        print("$file is encrypted: $a");
+        if (a) {
           setState(() {
             encryptedImages.add(file);
           });
@@ -211,7 +231,7 @@ class _HomePageState extends State<HomePage>
         selectedImages.clear();
       });
 
-      print("Loaded ${files.length} images from $finalPath");
+      //print("Loaded ${files.length} images from $finalPath");
     } catch (e) {
       setState(() {
         originalImages = [];
@@ -255,17 +275,18 @@ class _HomePageState extends State<HomePage>
     });
   }
 
-  Future<void> encryptSelectedImages(String key) async {
+  Future<void> encryptSelectedImages(
+      String path, String bookmark, String key) async {
+
+    print("encryptSelectedImages is called");
     if (selectedImages.isEmpty) return;
 
     // Simulate encryption process
     for (var image in selectedImages) {
       if (!encryptedImages.contains(image)) {
-        jpe.jumbleImage(image.path, image.path, key);
-        setState(() {
-          encryptedImages.add(image);
-          originalImages.removeWhere((element) => element.path == image.path);
-        });
+        await jpe.jumbleImage(image.path, image.path, key);
+        await FileImage(File(image.path)).evict();
+        print("Encrypted ${image.path.split(Platform.pathSeparator).last}");
       }
     }
 
@@ -279,22 +300,86 @@ class _HomePageState extends State<HomePage>
 
     // Clear selection after encryption
     clearSelection();
+    await loadImagesFromFolder(path, bookmark, key);
   }
 
-  Future<void> encryptImage(File originalImage) async {
-    // Simulate encryption process
-    setState(() {
-      encryptedImages.add(originalImage);
-    });
+  Future<void> decryptSelectedImages(
+      String path, String bookmark, String key) async {
+
+    print("decryptSelectedImages is called");
+    if (selectedImages.isEmpty) return;
+
+    for (var image in selectedImages) {
+      if (!originalImages.contains(image)) {
+        await jpe.unjumbleImage(image.path, image.path, key);
+        await FileImage(File(image.path)).evict();
+        print("Decrypted ${image.path.split(Platform.pathSeparator).last}");
+      }
+    }
 
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
-        content: Text(
-            'Encrypted ${originalImage.path.split(Platform.pathSeparator).last}'),
+        content: Text('Decrypted ${selectedImages.length} image(s)'),
         backgroundColor: Theme.of(context).colorScheme.secondary,
         duration: const Duration(seconds: 2),
       ),
     );
+
+    clearSelection();
+    await loadImagesFromFolder(path, bookmark, key);
+  }
+
+  Future<void> encryptImage(File originalImage) async {
+
+    print("encryptImage is called");
+    // Actually encrypt the image in-place with currentKey
+    try {
+      jpe.jumbleImage(originalImage.path, originalImage.path, currentKey);
+      await loadImagesFromFolder(currentPath, currentBookmark, currentKey);
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+              'Encrypted ${originalImage.path.split(Platform.pathSeparator).last}'),
+          backgroundColor: Theme.of(context).colorScheme.secondary,
+          duration: const Duration(seconds: 2),
+        ),
+      );
+    } catch (e) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Encryption failed: $e'),
+          backgroundColor: Colors.redAccent,
+          duration: const Duration(seconds: 2),
+        ),
+      );
+    }
+  }
+
+  Future<void> decryptImage(File encryptedImage) async {
+    print("decryptImage is called");
+    // Actually encrypt the image in-place with currentKey
+    try {
+      jpe.unjumbleImage(encryptedImage.path, encryptedImage.path, currentKey);
+      await loadImagesFromFolder(currentPath, currentBookmark, currentKey);
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+              'Decrypted ${encryptedImage.path.split(Platform.pathSeparator).last}'),
+          backgroundColor: Theme.of(context).colorScheme.secondary,
+          duration: const Duration(seconds: 2),
+        ),
+      );
+    } catch (e) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Decryption failed: $e'),
+          backgroundColor: Colors.redAccent,
+          duration: const Duration(seconds: 2),
+        ),
+      );
+    }
   }
 
   Widget _buildImageGrid(List<File> imagesToShow, bool checking,
@@ -337,12 +422,19 @@ class _HomePageState extends State<HomePage>
         final file = imagesToShow[index];
         final isSelected = selectedImages.contains(file);
 
-        return _buildImageCard(file, showEncryptButton, isSelected);
+        return _buildImageCard(
+          file,
+          showEncryptButton,
+          isSelected,
+          showDecryptButton: !showEncryptButton,
+        );
       },
     );
   }
 
-  Widget _buildImageCard(File file, bool showEncryptButton, bool isSelected) {
+// Shi Karna hai
+  Widget _buildImageCard(File file, bool showEncryptButton, bool isSelected,
+      {bool showDecryptButton = false}) {
     return GestureDetector(
       onLongPress: () {
         if (!isSelecting) {
@@ -402,89 +494,9 @@ class _HomePageState extends State<HomePage>
                 ),
               ),
             ),
-          if (showEncryptButton && !isSelecting)
-            Positioned(
-              bottom: 8,
-              right: 8,
-              child: FloatingActionButton.small(
-                onPressed: () => encryptImage(file),
-                backgroundColor: Theme.of(context).colorScheme.secondary,
-                child: const Icon(Icons.lock, size: 18),
-              ),
-            ),
         ],
       ),
     );
-  }
-
-  Future<String> encryptImages(List<String> imagePaths,
-      {int choice = 1, int shift = 173, String key = ""}) async {
-    /*
-    imagePaths -> list of image paths
-    */
-
-    JumblePixels jp = JumblePixels();
-    ImageCeaserEncryptor ce = ImageCeaserEncryptor();
-
-    switch (choice) {
-      case 1:
-        // Ceaser Cipher Encryption
-        try {
-          ce.EncryptImages(imagePaths, shift);
-          return "true";
-        } catch (e) {
-          print(e); // Debug
-          return "false";
-        }
-      case 2:
-        // Jumbled Pixel Encryption
-        for (String file in imagePaths) {
-          try {
-            jp.jumbleImage(file, file, key);
-          } catch (e) {
-            print(e); // Debug
-            return file;
-          }
-        }
-        return "true";
-      default:
-        throw Exception("Invalid Choice");
-    }
-  }
-
-  Future<String> decryptImages(List<String> imagePaths,
-      {int choice = 1, int shift = 173, String key = ""}) async {
-    /*
-    imagePaths -> list of image paths
-    */
-
-    JumblePixels jp = JumblePixels();
-    ImageCeaserEncryptor ce = ImageCeaserEncryptor();
-
-    switch (choice) {
-      case 1:
-        // Ceaser Cipher Decryption
-        try {
-          ce.DecryptImages(imagePaths, shift);
-          return "true";
-        } catch (e) {
-          print(e); // Debug
-          return "false";
-        }
-      case 2:
-        // Jumbled Pixel Encryption
-        for (String file in imagePaths) {
-          try {
-            jp.unjumbleImage(file, file, key);
-          } catch (e) {
-            print(e); // Debug
-            return file;
-          }
-        }
-        return "true";
-      default:
-        throw Exception("Invalid Choice");
-    }
   }
 
   @override
@@ -493,16 +505,23 @@ class _HomePageState extends State<HomePage>
       appBar: AppBar(
         title: const Text('Obscura Gallery'),
         toolbarHeight: 50,
+        leading: IconButton(
+          onPressed: () async {
+            print("Settings button pressed");
+            List<Map<String, dynamic>> data = await db.getAllRecords();
+            for (var i = 0; i < data.length; i++) {
+              print(data[i]);
+            }
+          },
+          icon: Icon(Icons.settings),
+        ),
         actions: <Widget>[
           IconButton(
-            onPressed: () async {
-              print("Settings button pressed");
-              List<Map<String, dynamic>> data = await db.getAllRecords();
-              for (var i = 0; i < data.length; i++) {
-                print(data[i]);
-              }
+            // Reload Button
+            onPressed: () {
+              loadImagesFromFolder(currentPath, currentBookmark, currentKey);
             },
-            icon: Icon(Icons.settings),
+            icon: Icon(Icons.replay_rounded),
           ),
         ],
       ),
@@ -559,9 +578,10 @@ class _HomePageState extends State<HomePage>
                   child: ListView.builder(
                     itemCount: folderPaths.length,
                     itemBuilder: (context, index) {
-                      final path = folderPaths[index];
-                      final name = path.split(Platform.pathSeparator).last;
-                      final bookmark = bookmarkList[index];
+                      currentPath = folderPaths[index];
+                      final name =
+                          currentPath.split(Platform.pathSeparator).last;
+                      currentBookmark = bookmarkList[index];
                       final key = keys[index];
                       return ListTile(
                         leading: const Icon(Icons.folder, color: Colors.amber),
@@ -578,7 +598,7 @@ class _HomePageState extends State<HomePage>
                           ),
                         ),
                         subtitle: Text(
-                          path,
+                          currentPath,
                           overflow: TextOverflow.ellipsis,
                           style:
                               TextStyle(fontSize: 12, color: Colors.grey[600]),
@@ -586,10 +606,11 @@ class _HomePageState extends State<HomePage>
                         trailing: IconButton(
                           icon: const Icon(Icons.delete_forever_outlined,
                               size: 20, color: Colors.red),
-                          onPressed: () => deleteFolder(path),
+                          onPressed: () => deleteFolder(currentPath),
                           tooltip: "Delete Path",
                         ),
-                        onTap: () => loadImagesFromFolder(path, bookmark, key),
+                        onTap: () => loadImagesFromFolder(
+                            currentPath, currentBookmark, key),
                         shape: RoundedRectangleBorder(
                           borderRadius: BorderRadius.circular(8),
                         ),
@@ -606,7 +627,7 @@ class _HomePageState extends State<HomePage>
           // MAIN CONTENT AREA
           Expanded(
             child: Container(
-              color: Theme.of(context).colorScheme.background,
+              color: Theme.of(context).colorScheme.surface,
               child: Column(
                 children: [
                   // Folder name and status (finalized)
@@ -677,7 +698,9 @@ class _HomePageState extends State<HomePage>
                               size: 16, color: Colors.blue),
                           const SizedBox(width: 8),
                           Text(
-                            "Select images to encrypt (${selectedImages.length} selected)",
+                            _tabController.index == 0
+                                ? "Select images to encrypt (${selectedImages.length} selected)"
+                                : "Select images to decrypt (${selectedImages.length} selected)",
                             style: const TextStyle(
                               color: Colors.blue,
                               fontWeight: FontWeight.w500,
@@ -716,13 +739,17 @@ class _HomePageState extends State<HomePage>
                       children: [
                         // Original Images Tab
                         _buildImageGrid(
-                            originalImages, showEncryptButton: true, checking),
+                          originalImages,
+                          checking,
+                          showEncryptButton: true,
+                        ),
 
                         // Encrypted Images Tab
                         _buildImageGrid(
-                            encryptedImages,
-                            showEncryptButton: false,
-                            checking),
+                          encryptedImages,
+                          checking,
+                          showEncryptButton: false,
+                        ),
                       ],
                     ),
                   ),
@@ -732,15 +759,24 @@ class _HomePageState extends State<HomePage>
           ),
         ],
       ),
-      // Bottom encryption button when in selection mode
+      // Bottom action button when in selection mode
 
       floatingActionButton: isSelecting && selectedImages.isNotEmpty
-          ? FloatingActionButton.extended(
-              onPressed: () =>encryptSelectedImages(currentKey),
-              backgroundColor: Theme.of(context).colorScheme.secondary,
-              icon: const Icon(Icons.lock),
-              label: Text('Encrypt ${selectedImages.length} image(s)'),
-            )
+          ? (_tabController.index == 0
+              ? FloatingActionButton.extended(
+                  onPressed: () => encryptSelectedImages(
+                      currentPath, currentBookmark, currentKey),
+                  backgroundColor: Theme.of(context).colorScheme.secondary,
+                  icon: const Icon(Icons.lock),
+                  label: Text('Encrypt ${selectedImages.length} image(s)'),
+                )
+              : FloatingActionButton.extended(
+                  onPressed: () => decryptSelectedImages(
+                      currentPath, currentBookmark, currentKey),
+                  backgroundColor: Theme.of(context).colorScheme.primary,
+                  icon: const Icon(Icons.lock_open),
+                  label: Text('Decrypt ${selectedImages.length} image(s)'),
+                ))
           : null,
     );
   }

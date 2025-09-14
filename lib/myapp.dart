@@ -23,7 +23,7 @@ class MyApp extends StatelessWidget {
           foregroundColor: Colors.white,
           elevation: 0,
         ),
-        tabBarTheme: const TabBarTheme(
+        tabBarTheme: TabBarThemeData(
           labelColor: Color(0xFF00796B),
           unselectedLabelColor: Colors.grey,
           indicator: BoxDecoration(

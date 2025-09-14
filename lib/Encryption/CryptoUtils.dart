@@ -1,6 +1,7 @@
 import 'dart:io';
 import 'dart:math';
 import 'dart:convert';
+import 'dart:typed_data';
 import 'package:image/image.dart' as img;
 import 'package:crypto/crypto.dart' as crypto;
 
@@ -158,8 +159,9 @@ class JumblePixels {
 
   int _seedFromKey(String key) {
     final h = crypto.sha256.convert(utf8.encode(key)).bytes;
-    // take first 4 bytes as a 32-bit unsigned seed
-    return (h[0] << 24) | (h[1] << 16) | (h[2] << 8) | h[3];
+    final bd = ByteData.sublistView(Uint8List.fromList(h));
+    // big-endian uint32 -> deterministic positive seed
+    return bd.getUint32(0, Endian.big);
   }
 
   List<int> _generatePermutation(int n, int seed) {
@@ -199,7 +201,8 @@ class JumblePixels {
     return [r, g, b, a]; // order matches setPixelRgba(r,g,b,a)
   }
 
-  Future<void> jumbleImage(String inPath, String outPath, String key) async {
+  Future<void> jumbleImage(
+      String inPath, String outPath, String key) async {
     final image = _loadImage(inPath);
     if (image == null) throw Exception('Cannot load image');
     final w = image.width;
@@ -225,8 +228,7 @@ class JumblePixels {
     final m = n - reservedCount; // number of indices to permute
     final perm =
         _generatePermutation(m, _seedFromKey(key)); // values in [0..m-1]
-
-    // apply permutation only to indices >= _reservedCount
+    // apply permutation only to indices >= reservedCount
     final shuffled = List<int>.from(pixels);
     for (int j = 0; j < m; j++) {
       final targetIndex = reservedCount + j;
@@ -246,9 +248,11 @@ class JumblePixels {
     }
     await File(outPath).writeAsBytes(img.encodePng(out));
     print('Saved jumbled image: $outPath');
+    //return perm;
   }
 
-  Future<void> unjumbleImage(String inPath, String outPath, String key) async {
+  Future<void> unjumbleImage(
+      String inPath, String outPath, String key) async {
     final image = _loadImage(inPath);
     if (image == null) throw Exception('Cannot load image');
     final w = image.width;
@@ -265,11 +269,12 @@ class JumblePixels {
     final b = markedPixel.b.toInt();
     if (!(r == markerRE && g == markerGE && b == markerBE)) {
       print("Not an encrypted image");
-      return;
+      return ;
     }
+    // Mark as decrypted
+    image.setPixelRgba(0, 0, markerRD, markerGD, markerBD, 255);
 
-    image.setPixelRgba(
-        0, 0, markerRD, markerGD, markerBD, 255); // reserve pixel
+    // leave input marker in place; output will get decrypted marker later
     final shuffled = List<int>.filled(n, 0);
     int idx = 0;
     for (int y = 0; y < h; y++) {
@@ -279,9 +284,16 @@ class JumblePixels {
     }
     //print("Shuffled");
 
-    final perm = _generatePermutation(n, _seedFromKey(key));
-    final orig = List<int>.filled(n, 0);
-    for (int i = 0; i < n; i++) orig[perm[i]] = shuffled[i];
+    // permutation size must match jumble: only permute indices >= reservedCount
+    final m = n - reservedCount;
+    final perm = _generatePermutation(m, _seedFromKey(key));
+    final orig = List<int>.from(shuffled);
+    // recover original pixels: orig[reservedCount + perm[j]] = shuffled[reservedCount + j]
+    for (int j = 0; j < m; j++) {
+      final targetIndex = reservedCount + perm[j];
+      final sourceIndex = reservedCount + j;
+      orig[targetIndex] = shuffled[sourceIndex];
+    }
 
     //print("Orig");
     idx = 0;
@@ -295,6 +307,7 @@ class JumblePixels {
     }
     await File(outPath).writeAsBytes(img.encodePng(out));
     print('Saved unjumbled image: $outPath');
+    //return perm;
   }
 
   Future<bool> isJumbled(File image) async {
@@ -314,3 +327,18 @@ class JumblePixels {
   }
 }
 
+// void main() async {
+//   JumblePixels jumbler = JumblePixels();
+//   String key = "secret";
+//   String inPath = "/Users/shashvatgarg/Desktop/Test/1.jpg";
+//   String outPath = "/Users/shashvatgarg/Desktop/Test/1_jumbled.png";
+//   String outPath2 = "/Users/shashvatgarg/Desktop/Test/1_unjumbled.png";
+//   List<int> perme = await jumbler.jumbleImage(inPath, outPath, key);
+//   List<int> permd = await jumbler.unjumbleImage(outPath, outPath2, key);
+//   for (int i = 0; i < perme.length; i++) {
+//     if (perme[i] != permd[i]) {
+//       print("Mismatch at index $i: ${perme[i]} != ${permd[i]}");
+//       return;
+//     }
+//   }
+// }

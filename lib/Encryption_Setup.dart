@@ -8,6 +8,8 @@ String defaultKey = '';
 
 // Encryption Setup Dialog Widget
 class EncryptionSetupDialog extends StatefulWidget {
+  const EncryptionSetupDialog({super.key});
+
   @override
   _EncryptionSetupDialogState createState() => _EncryptionSetupDialogState();
 }
@@ -38,7 +40,7 @@ class _EncryptionSetupDialogState extends State<EncryptionSetupDialog> {
             const Text('Select encryption type:'),
             const SizedBox(height: 10),
             DropdownButtonFormField<String>(
-              value: _selectedEncType,
+              initialValue: _selectedEncType,
               items: encryptionTypes.map((String type) {
                 return DropdownMenuItem<String>(
                   value: type,
