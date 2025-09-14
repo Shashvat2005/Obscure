@@ -1,8 +1,9 @@
 import 'dart:io';
-import 'package:flutter/foundation.dart' show compute;
+import 'package:flutter/foundation.dart' show compute, Uint8List;
 import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:macos_secure_bookmarks/macos_secure_bookmarks.dart';
+import 'package:obscura/Components/fullScreenImg.dart';
 import 'package:obscura/Database/dbHelper.dart';
 import 'package:obscura/Encryption/CryptoUtils.dart';
 import 'package:file_selector/file_selector.dart';
@@ -14,8 +15,7 @@ class HomePage extends StatefulWidget {
   State<HomePage> createState() => _HomePageState();
 }
 
-class _HomePageState extends State<HomePage>
-    with SingleTickerProviderStateMixin {
+class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin {
   final db = DatabaseHelper();
   final jpe = JumblePixels();
 
@@ -129,6 +129,7 @@ class _HomePageState extends State<HomePage>
         setState(() {
           folderPaths.add(path);
           bookmarkList.add(bookmark);
+          keys.add(key);
         });
 
         await db.saveFolder(
@@ -350,6 +351,55 @@ class _HomePageState extends State<HomePage>
     });
   }
 
+  Future<void> showTempDecrypted(File file) async {
+    setState(() => isProcessing = true);
+    try {
+      // call compute wrapper that returns PNG bytes of the unjumbled image
+      final Uint8List bytes = await compute(
+          unjumbleToMemoryWrapper, {'in': file.path, 'key': currentKey});
+
+      // Show a dialog with the image (keeps it in memory only)
+      await showDialog(
+        context: context,
+        builder: (ctx) => Dialog(
+          insetPadding: const EdgeInsets.all(20),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Container(
+                padding: const EdgeInsets.all(8),
+                child: Text(
+                  file.path.split(Platform.pathSeparator).last,
+                  style: const TextStyle(fontWeight: FontWeight.w600),
+                ),
+              ),
+              Flexible(
+                child: InteractiveViewer(
+                  child: Image.memory(
+                    bytes,
+                    fit: BoxFit.contain,
+                    errorBuilder: (c, e, st) =>
+                        const SizedBox(child: Text('Cannot render image')),
+                  ),
+                ),
+              ),
+              TextButton(
+                onPressed: () => Navigator.of(ctx).pop(),
+                child: const Text('Close'),
+              ),
+            ],
+          ),
+        ),
+      );
+    } catch (e) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Preview failed: $e')),
+      );
+    } finally {
+      setState(() => isProcessing = false);
+    }
+  }
+
   Future<void> encryptImage(File originalImage) async {
     print("encryptImage is called");
     // Actually encrypt the image in-place with currentKey
@@ -402,6 +452,25 @@ class _HomePageState extends State<HomePage>
     }
   }
 
+
+  void _onShowImage(File file) {
+    final images = _tabController.index == 1 ? encryptedImages : originalImages;
+    final start = images.indexWhere((f) => f.path == file.path);
+    if (start < 0) return;
+    Navigator.of(context).push(MaterialPageRoute(
+      builder: (_) => FullscreenImageGallery(
+        images: images,
+        startIndex: start,
+        encrypted: (_tabController.index == 1),
+        keyString: currentKey,
+        cacheSize: 10,
+      ),
+      fullscreenDialog: true,
+    ));
+  }
+
+
+
   Widget _buildImageGrid(List<File> imagesToShow, bool checking,
       {bool showEncryptButton = true}) {
     if (imagesToShow.isEmpty) {
@@ -452,7 +521,7 @@ class _HomePageState extends State<HomePage>
     );
   }
 
-// Shi Karna hai
+
   Widget _buildImageCard(File file, bool showEncryptButton, bool isSelected,
       {bool showDecryptButton = false}) {
     return GestureDetector(
@@ -512,6 +581,24 @@ class _HomePageState extends State<HomePage>
                   color: isSelected ? Colors.white : Colors.grey,
                   size: 20,
                 ),
+              ),
+            ),
+          // Add Show button overlay for encrypted items (only when not selecting)
+          if (showDecryptButton && !isSelecting)
+            Positioned(
+              bottom: 8,
+              left: 8,
+              right: 8,
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  ElevatedButton(
+                    style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.black54, padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6)),
+                    onPressed: () => showTempDecrypted(file),
+                    child: const Text('Show', style: TextStyle(color: Colors.white)),
+                  ),
+                ],
               ),
             ),
         ],
@@ -699,11 +786,22 @@ class _HomePageState extends State<HomePage>
                                 },
                                 child: const Text("Select"),
                               ),
-                            if (isSelecting)
+                            // Single "Show" button — shows the first image of the current tab
+                            if (!isSelecting &&
+                                ((_tabController.index == 0 && originalImages.isNotEmpty) ||
+                                    (_tabController.index == 1 && encryptedImages.isNotEmpty)))
                               TextButton(
-                                onPressed: clearSelection,
-                                child: Text("Cancel"),
+                                onPressed: () {
+                                  final images = _tabController.index == 1 ? encryptedImages : originalImages;
+                                  if (images.isNotEmpty) _onShowImage(images.first);
+                                },
+                                child: const Text("Show"),
                               ),
+                             if (isSelecting)
+                               TextButton(
+                                 onPressed: clearSelection,
+                                 child: Text("Cancel"),
+                               ),
                           ],
                         ),
                       ),
@@ -744,13 +842,24 @@ class _HomePageState extends State<HomePage>
                             ),
                           ],
                         ),
-                        child: TabBar(
-                          controller: _tabController,
-                          labelStyle: const TextStyle(fontWeight: FontWeight.w600),
-                          tabs: [
-                            Tab(text: "Original Images"),
-                            Tab(text: "Encrypted Images"),
-                          ],
+                        // child: TabBar(
+                        //   controller: _tabController,
+                        //   labelStyle: const TextStyle(fontWeight: FontWeight.w600),
+                        //   tabs: [
+                        //     Tab(text: "Original Images"),
+                        //     Tab(text: "Encrypted Images"),
+                        //   ],
+                        // ),
+                        child: IgnorePointer(
+                          ignoring: isSelecting,
+                          child: TabBar(
+                            controller: _tabController,
+                            labelStyle: const TextStyle(fontWeight: FontWeight.w600),
+                            tabs: [
+                              Tab(text: "Original Images"),
+                              Tab(text: "Encrypted Images"),
+                            ],
+                          ),
                         ),
                       ),
                   
@@ -758,6 +867,9 @@ class _HomePageState extends State<HomePage>
                       Expanded(
                         child: TabBarView(
                           controller: _tabController,
+                          physics: isSelecting
+                              ? const NeverScrollableScrollPhysics()
+                              : null,
                           children: [
                             // Original Images Tab
                             _buildImageGrid(

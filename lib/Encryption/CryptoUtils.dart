@@ -23,6 +23,14 @@ Future<void> unjumbleWrapper(Map<String, String> args) async {
   await j.unjumbleImage(inPath, outPath, key);
 }
 
+
+Future<Uint8List> unjumbleToMemoryWrapper(Map<String, String> args) async {
+  final inPath = args['in']!;
+  final key = args['key']!;
+  final j = JumblePixels();
+  return await j.unjumbleImageToBytes(inPath, key);
+}
+
 class ImageCeaserEncryptor {
   static const markerR = 123;
   static const markerG = 45;
@@ -343,6 +351,63 @@ class JumblePixels {
     }
     return false;
   }
+
+  Future<Uint8List> unjumbleImageToBytes(String inPath, String key) async {
+    final image = _loadImage(inPath);
+    if (image == null) throw Exception('Cannot load image');
+
+    final w = image.width;
+    final h = image.height;
+    final n = w * h;
+    if (n <= reservedCount) throw Exception('Image too small');
+
+    // Verify marker in reserved pixel(s)
+    final markedPixel = image.getPixel(0, 0);
+    final r = markedPixel.r.toInt();
+    final g = markedPixel.g.toInt();
+    final b = markedPixel.b.toInt();
+    if (!(r == markerRE && g == markerGE && b == markerBE)) {
+      throw Exception('Not a jumbled image (marker missing)');
+    }
+
+    // Read pixels into linear array
+    final shuffled = List<int>.filled(n, 0);
+    int idx = 0;
+    for (int y = 0; y < h; y++) {
+      for (int x = 0; x < w; x++) {
+        shuffled[idx++] = _packPixel(image.getPixel(x, y));
+      }
+    }
+
+    // Build inverse permutation (matching jumbleImage: permute indices >= reservedCount)
+    final m = n - reservedCount;
+    final perm = _generatePermutation(m, _seedFromKey(key));
+    final orig = List<int>.from(shuffled);
+    // Recover original pixels: orig[reservedCount + perm[j]] = shuffled[reservedCount + j]
+    for (int j = 0; j < m; j++) {
+      final targetIndex = reservedCount + perm[j];
+      final sourceIndex = reservedCount + j;
+      orig[targetIndex] = shuffled[sourceIndex];
+    }
+
+    // Create output image from orig pixels (do not modify input file)
+    idx = 0;
+    final out = img.Image(width: w, height: h);
+    for (int y = 0; y < h; y++) {
+      for (int x = 0; x < w; x++) {
+        final channels = _unpackPixelInt(orig[idx++]);
+        out.setPixelRgba(x, y, channels[0], channels[1], channels[2], channels[3]);
+      }
+    }
+
+    // Optionally overwrite reserved marker in returned image to indicate "decrypted view"
+    out.setPixelRgba(0, 0, markerRD, markerGD, markerBD, 255);
+
+    // Encode to PNG bytes and return (no disk IO)
+    final png = img.encodePng(out);
+    return Uint8List.fromList(png);
+  }
+
 }
 
 // void main() async {
