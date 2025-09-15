@@ -172,71 +172,52 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
       originalImages = [];
       encryptedImages = [];
     });
-    //print("Loading images for: $path");
 
     try {
       String finalPath = path;
-      // print("Platform: ${Platform.isMacOS}");
-      // print("Bookmark: ${bookmark.isNotEmpty}");
-      // print("Condition: ${Platform.isMacOS && bookmark.isNotEmpty}");
-
       if (Platform.isMacOS && bookmark.isNotEmpty) {
         try {
-          FileSystemEntity resolved =
-              await SecureBookmarks().resolveBookmark(bookmark);
-          finalPath = resolved.path; // get actual usable path
-          //print("Resolved bookmark → $finalPath");
+          final resolved = await SecureBookmarks().resolveBookmark(bookmark);
+          finalPath = resolved.path;
           await SecureBookmarks()
               .startAccessingSecurityScopedResource(resolved);
         } catch (e) {
-          //rint("Bookmark resolution failed, fallback to original path: $e");
           finalPath = path;
         }
       }
 
       final dir = Directory(finalPath);
       if (!await dir.exists()) {
-        //print("Directory does not exist: $finalPath");
         setState(() {
           originalImages = [];
           encryptedImages = [];
           imgCount = 0;
+          checking = false;
         });
         return;
       }
 
       final exts = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.heic'];
 
-      final files = dir
-          .listSync()
-          .whereType<File>()
-          .where((f) => exts.any((e) => f.path.toLowerCase().endsWith(e)))
-          .toList();
+      // Offload expensive scanning + decoding to a background isolate
+      final Map<String, List<String>> scanned = await compute(
+        scanFolderWrapper,
+        {'path': finalPath, 'exts': exts},
+      );
 
-      files.sort((a, b) => a.path.compareTo(b.path));
-      for (var file in files) {
-        bool a = await jpe.isJumbled(file);
-        print("$file is encrypted: $a");
-        if (a) {
-          setState(() {
-            encryptedImages.add(file);
-          });
-        } else {
-          setState(() {
-            originalImages.add(file);
-          });
-        }
-      }
-
+      // Convert to File lists and update state once
       setState(() {
-        imgCount = files.length;
+        encryptedImages =
+            (scanned['encrypted'] ?? []).map((p) => File(p)).toList();
+        originalImages =
+            (scanned['original'] ?? []).map((p) => File(p)).toList();
+        imgCount = encryptedImages.length + originalImages.length;
         folderName = finalPath.split(Platform.pathSeparator).last;
+        currentPath = finalPath; // mark currently loaded folder
         isSelecting = false;
         selectedImages.clear();
         checking = false;
       });
-
-      //print("Loaded ${files.length} images from $finalPath");
     } catch (e) {
       setState(() {
         originalImages = [];
@@ -247,7 +228,7 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
       print("Error loading images: $e");
     }
   }
-
+  
   void toggleSelection(File image) {
     setState(() {
       if (selectedImages.contains(image)) {

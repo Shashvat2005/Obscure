@@ -6,7 +6,6 @@ import 'package:image/image.dart' as img;
 import 'package:crypto/crypto.dart' as crypto;
 import 'dart:async';
 
-
 Future<void> jumbleWrapper(Map<String, String> args) async {
   final inPath = args['in']!;
   final outPath = args['out']!;
@@ -23,12 +22,47 @@ Future<void> unjumbleWrapper(Map<String, String> args) async {
   await j.unjumbleImage(inPath, outPath, key);
 }
 
-
 Future<Uint8List> unjumbleToMemoryWrapper(Map<String, String> args) async {
   final inPath = args['in']!;
   final key = args['key']!;
   final j = JumblePixels();
   return await j.unjumbleImageToBytes(inPath, key);
+}
+
+// args: {'path': String, 'exts': List<String>}
+Future<Map<String, List<String>>> scanFolderWrapper(Map args) async {
+  final String path = args['path'] as String;
+  final List<String> exts = List<String>.from(args['exts'] as List);
+  final dir = Directory(path);
+  final result = <String, List<String>>{
+    'encrypted': <String>[],
+    'original': <String>[],
+  };
+
+  if (!await dir.exists()) return result;
+
+  final files = dir
+      .listSync()
+      .whereType<File>()
+      .where((f) => exts.any((e) => f.path.toLowerCase().endsWith(e)))
+      .toList()
+    ..sort((a, b) => a.path.compareTo(b.path));
+
+  final j = JumblePixels();
+  for (final f in files) {
+    try {
+      final isEnc = await j.isJumbled(f);
+      if (isEnc) {
+        result['encrypted']!.add(f.path);
+      } else {
+        result['original']!.add(f.path);
+      }
+    } catch (e) {
+      // skip unreadable/corrupt files
+      // optionally collect errors in another list if you want to report them
+    }
+  }
+  return result;
 }
 
 class ImageCeaserEncryptor {
@@ -227,8 +261,7 @@ class JumblePixels {
     return [r, g, b, a]; // order matches setPixelRgba(r,g,b,a)
   }
 
-  Future<void> jumbleImage(
-      String inPath, String outPath, String key) async {
+  Future<void> jumbleImage(String inPath, String outPath, String key) async {
     final image = _loadImage(inPath);
     if (image == null) throw Exception('Cannot load image');
     final w = image.width;
@@ -277,8 +310,7 @@ class JumblePixels {
     //return perm;
   }
 
-  Future<void> unjumbleImage(
-      String inPath, String outPath, String key) async {
+  Future<void> unjumbleImage(String inPath, String outPath, String key) async {
     final image = _loadImage(inPath);
     if (image == null) throw Exception('Cannot load image');
     final w = image.width;
@@ -295,7 +327,7 @@ class JumblePixels {
     final b = markedPixel.b.toInt();
     if (!(r == markerRE && g == markerGE && b == markerBE)) {
       print("Not an encrypted image");
-      return ;
+      return;
     }
     // Mark as decrypted
     image.setPixelRgba(0, 0, markerRD, markerGD, markerBD, 255);
@@ -396,7 +428,8 @@ class JumblePixels {
     for (int y = 0; y < h; y++) {
       for (int x = 0; x < w; x++) {
         final channels = _unpackPixelInt(orig[idx++]);
-        out.setPixelRgba(x, y, channels[0], channels[1], channels[2], channels[3]);
+        out.setPixelRgba(
+            x, y, channels[0], channels[1], channels[2], channels[3]);
       }
     }
 
@@ -407,21 +440,6 @@ class JumblePixels {
     final png = img.encodePng(out);
     return Uint8List.fromList(png);
   }
-
 }
 
-// void main() async {
-//   JumblePixels jumbler = JumblePixels();
-//   String key = "secret";
-//   String inPath = "/Users/shashvatgarg/Desktop/Test/1.jpg";
-//   String outPath = "/Users/shashvatgarg/Desktop/Test/1_jumbled.png";
-//   String outPath2 = "/Users/shashvatgarg/Desktop/Test/1_unjumbled.png";
-//   List<int> perme = await jumbler.jumbleImage(inPath, outPath, key);
-//   List<int> permd = await jumbler.unjumbleImage(outPath, outPath2, key);
-//   for (int i = 0; i < perme.length; i++) {
-//     if (perme[i] != permd[i]) {
-//       print("Mismatch at index $i: ${perme[i]} != ${permd[i]}");
-//       return;
-//     }
-//   }
-// }
+
