@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:isolate';
 import 'dart:math';
 import 'dart:convert';
 import 'dart:typed_data';
@@ -64,6 +65,57 @@ Future<Map<String, List<String>>> scanFolderWrapper(Map args) async {
   }
   return result;
 }
+
+// Spawned in a separate isolate. Sends progress messages to the provided SendPort.
+// Messages:
+//  {'type':'total', 'total': int}
+//  {'type':'progress', 'processed': int}
+//  {'type':'done', 'encrypted': List<String>, 'original': List<String>}
+Future<void> scanFolderIsolate(Map msg) async {
+  final SendPort send = msg['sendPort'] as SendPort;
+  final String path = msg['path'] as String;
+  final List<String> exts = List<String>.from(msg['exts'] as List);
+
+  final encrypted = <String>[];
+  final original = <String>[];
+
+  final dir = Directory(path);
+  if (!await dir.exists()) {
+    send.send({'type': 'total', 'total': 0});
+    send.send({'type': 'done', 'encrypted': encrypted, 'original': original});
+    return;
+  }
+
+  final files = dir
+      .listSync()
+      .whereType<File>()
+      .where((f) => exts.any((e) => f.path.toLowerCase().endsWith(e)))
+      .toList()
+    ..sort((a, b) => a.path.compareTo(b.path));
+
+  send.send({'type': 'total', 'total': files.length});
+
+  final j = JumblePixels();
+  for (var i = 0; i < files.length; i++) {
+    final f = files[i];
+    bool isEnc = false;
+    try {
+      isEnc = await j.isJumbled(f);
+    } catch (_) {
+      isEnc = false;
+    }
+    if (isEnc) {
+      encrypted.add(f.path);
+    } else {
+      original.add(f.path);
+    }
+    // incremental progress update
+    send.send({'type': 'progress', 'processed': i + 1});
+  }
+
+  send.send({'type': 'done', 'encrypted': encrypted, 'original': original});
+}
+
 
 class ImageCeaserEncryptor {
   static const markerR = 123;

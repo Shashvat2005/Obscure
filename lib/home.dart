@@ -1,4 +1,6 @@
+import 'dart:async';
 import 'dart:io';
+import 'dart:isolate';
 import 'package:flutter/foundation.dart' show compute, Uint8List;
 import 'dart:math';
 import 'package:flutter/material.dart';
@@ -8,8 +10,6 @@ import 'package:obscura/Database/dbHelper.dart';
 import 'package:obscura/Encryption/CryptoUtils.dart';
 import 'package:file_selector/file_selector.dart';
 
-// Fix the bug where only last folder is loaded, update the variables in the function not in build
-// above needs to be implemented
 
 class HomePage extends StatefulWidget {
   const HomePage({super.key});
@@ -45,6 +45,13 @@ class _HomePageState extends State<HomePage>
 
   bool isProcessing = false;
 
+  int totalFiles = 0;
+  int processedFiles = 0;
+
+  ReceivePort? _scanRp;
+  Isolate? _scanIsolate;
+  StreamSubscription? _scanSubscription;
+
   String getRandomString(int length) {
     String chars =
         'AaBbCcDdEeFfGgHhIiJjKkLlMmNnOoPpQqRrSsTtUuVvWwXxYyZz1234567890';
@@ -72,6 +79,16 @@ class _HomePageState extends State<HomePage>
 
   @override
   void dispose() {
+    // clean up any running scanner isolate
+    try {
+      _scanSubscription?.cancel();
+    } catch (_) {}
+    try {
+      _scanRp?.close();
+    } catch (_) {}
+    try {
+      _scanIsolate?.kill(priority: Isolate.immediate);
+    } catch (_) {}
     _tabController.dispose();
     super.dispose();
   }
@@ -81,6 +98,7 @@ class _HomePageState extends State<HomePage>
     final folders = await db.getAllRecords();
     folderPaths.clear();
     bookmarkList.clear();
+    keys.clear();
 
     for (final folder in folders) {
       final folderPath = folder['folderPath'] as String;
@@ -160,15 +178,55 @@ class _HomePageState extends State<HomePage>
   Future<void> deleteFolder(String path) async {
     print("deleteFolder is called");
     await db.deleteRecordByFilePath(path);
+    // If a scan for this folder is running, cancel it
+    try { await _scanSubscription?.cancel(); } catch (_) {}
+    _scanSubscription = null;
+    try { _scanRp?.close(); } catch (_) {}
+    _scanRp = null;
+    try { _scanIsolate?.kill(priority: Isolate.immediate); } catch (_) {}
+    _scanIsolate = null;
     setState(() {
-      folderPaths.remove(path);
-      encryptedImages = [];
-      originalImages = [];
+      // remove the entry at the same index from all parallel lists
+      final idx = folderPaths.indexOf(path);
+      if (idx >= 0) {
+        folderPaths.removeAt(idx);
+        if (bookmarkList.length > idx) bookmarkList.removeAt(idx);
+        if (keys.length > idx) keys.removeAt(idx);
+      } else {
+        // fallback: remove by value if not found by index
+        folderPaths.remove(path);
+      }
+      // if we deleted the currently loaded folder, clear view state
+      if (currentPath == path) {
+        currentPath = "";
+        currentBookmark = "";
+        currentKey = "";
+        folderName = "";
+        encryptedImages = [];
+        originalImages = [];
+        imgCount = 0;
+      }
     });
   }
 
-  Future<void> loadImagesFromFolder(String path, String bookmark, String key) async {
+  Future<void> loadImagesFromFolder(
+      String path, String bookmark, String key) async {
     print("loadImagesFromFolder is called");
+
+    // Cancel any previous running scan to avoid its "done" overwriting this load
+    try {
+      await _scanSubscription?.cancel();
+    } catch (_) {}
+    _scanSubscription = null;
+    try {
+      _scanRp?.close();
+    } catch (_) {}
+    _scanRp = null;
+    try {
+      _scanIsolate?.kill(priority: Isolate.immediate);
+    } catch (_) {}
+    _scanIsolate = null;
+
     setState(() {
       currentKey = key;
       currentBookmark = bookmark;
@@ -179,6 +237,8 @@ class _HomePageState extends State<HomePage>
       encryptedImages = [];
       isSelecting = false;
       selectedImages.clear();
+      totalFiles = 0;
+      processedFiles = 0;
     });
 
     try {
@@ -207,24 +267,99 @@ class _HomePageState extends State<HomePage>
 
       final exts = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.heic'];
 
-      // Offload expensive scanning + decoding to a background isolate
-      final Map<String, List<String>> scanned = await compute(
-        scanFolderWrapper,
-        {'path': finalPath, 'exts': exts},
+      // quick file list shown immediately (optional)
+      final filesQuick = dir
+          .listSync()
+          .whereType<File>()
+          .where((f) => exts.any((e) => f.path.toLowerCase().endsWith(e)))
+          .toList()
+        ..sort((a, b) => a.path.compareTo(b.path));
+
+      setState(() {
+        originalImages = filesQuick;
+        encryptedImages = [];
+        imgCount = originalImages.length;
+      });
+
+      // Spawn the isolate scanner and listen for progress messages
+      // final rp = ReceivePort();
+      // final isolate = await Isolate.spawn(
+      //   scanFolderIsolate,
+      //   {'sendPort': rp.sendPort, 'path': finalPath, 'exts': exts},
+      //   paused: false,
+      // );
+
+      // StreamSubscription? sub;
+      // sub = rp.listen((dynamic message) {
+      //   if (message is Map) {
+      //     final type = message['type'];
+      //     if (type == 'total') {
+      //       setState(() => totalFiles = message['total'] as int);
+      //     } else if (type == 'progress') {
+      //       setState(() => processedFiles = message['processed'] as int);
+      //     } else if (type == 'done') {
+      //       final enc = (message['encrypted'] as List)
+      //           .map((p) => File(p as String))
+      //           .toList();
+      //       final orig = (message['original'] as List)
+      //           .map((p) => File(p as String))
+      //           .toList();
+      //       setState(() {
+      //         encryptedImages = enc;
+      //         originalImages = orig;
+      //         imgCount = encryptedImages.length + originalImages.length;
+      //         folderName = finalPath.split(Platform.pathSeparator).last;
+      //         currentPath = finalPath;
+      //         isSelecting = false;
+      //         selectedImages.clear();
+      //         checking = false;
+      //         // ensure progress shows completion
+      //         processedFiles = totalFiles;
+      //       });
+      //       // cleanup
+      //       sub?.cancel();
+      //       rp.close();
+      //       isolate.kill(priority: Isolate.immediate);
+      //     }
+      //   }
+      // });
+      _scanRp = ReceivePort();
+      _scanIsolate = await Isolate.spawn(
+        scanFolderIsolate,
+        {'sendPort': _scanRp!.sendPort, 'path': finalPath, 'exts': exts},
       );
 
-      // Convert to File lists and update state once
-      setState(() {
-        encryptedImages =
-            (scanned['encrypted'] ?? []).map((p) => File(p)).toList();
-        originalImages =
-            (scanned['original'] ?? []).map((p) => File(p)).toList();
-        imgCount = encryptedImages.length + originalImages.length;
-        folderName = finalPath.split(Platform.pathSeparator).last;
-        currentPath = finalPath; // mark currently loaded folder
-        isSelecting = false;
-        selectedImages.clear();
-        checking = false;
+      _scanSubscription = _scanRp!.listen((dynamic message) async {
+        if (message is Map) {
+          final type = message['type'];
+         if (type == 'total') {
+             setState(() => totalFiles = message['total'] as int);
+          } else if (type == 'progress') {
+            setState(() => processedFiles = message['processed'] as int);
+          } else if (type == 'done') {
+            final enc = (message['encrypted'] as List).map((p) => File(p as String)).toList();
+            final orig = (message['original'] as List).map((p) => File(p as String)).toList();
+            setState(() {
+              encryptedImages = enc;
+              originalImages = orig;
+              imgCount = encryptedImages.length + originalImages.length;
+              folderName = finalPath.split(Platform.pathSeparator).last;
+              currentPath = finalPath;
+              isSelecting = false;
+              selectedImages.clear();
+              checking = false;
+              // ensure progress shows completion
+              processedFiles = totalFiles;
+            });
+            // cleanup this isolate's resources
+            try { await _scanSubscription?.cancel(); } catch (_) {}
+            _scanSubscription = null;
+            try { _scanRp?.close(); } catch (_) {}
+            _scanRp = null;
+            try { _scanIsolate?.kill(priority: Isolate.immediate); } catch (_) {}
+            _scanIsolate = null;
+          }
+        }
       });
     } catch (e) {
       setState(() {
@@ -232,6 +367,8 @@ class _HomePageState extends State<HomePage>
         encryptedImages = [];
         imgCount = 0;
         checking = false;
+        totalFiles = 0;
+        processedFiles = 0;
       });
       print("Error loading images: $e");
     }
@@ -596,7 +733,6 @@ class _HomePageState extends State<HomePage>
     );
   }
 
-
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -679,11 +815,13 @@ class _HomePageState extends State<HomePage>
                         itemCount: folderPaths.length,
                         itemBuilder: (context, index) {
                           final currPath = folderPaths[index];
-                          final name = currPath.split(Platform.pathSeparator).last;
+                          final name =
+                              currPath.split(Platform.pathSeparator).last;
                           final currBookmark = bookmarkList[index];
                           final key = keys[index];
                           return ListTile(
-                            leading: const Icon(Icons.folder, color: Colors.amber),
+                            leading:
+                                const Icon(Icons.folder, color: Colors.amber),
                             title: Text(
                               name,
                               overflow: TextOverflow.ellipsis,
@@ -837,14 +975,6 @@ class _HomePageState extends State<HomePage>
                             ),
                           ],
                         ),
-                        // child: TabBar(
-                        //   controller: _tabController,
-                        //   labelStyle: const TextStyle(fontWeight: FontWeight.w600),
-                        //   tabs: [
-                        //     Tab(text: "Original Images"),
-                        //     Tab(text: "Encrypted Images"),
-                        //   ],
-                        // ),
                         child: IgnorePointer(
                           ignoring: isSelecting,
                           child: TabBar(
