@@ -10,7 +10,6 @@ import 'package:obscura/Database/dbHelper.dart';
 import 'package:obscura/Encryption/CryptoUtils.dart';
 import 'package:file_selector/file_selector.dart';
 
-
 class HomePage extends StatefulWidget {
   const HomePage({super.key});
 
@@ -34,8 +33,6 @@ class _HomePageState extends State<HomePage>
   late TabController _tabController;
 
   int imgCount = 0;
-  int orgImages = 0;
-  int encImages = 0;
 
   bool checking = false;
 
@@ -44,6 +41,7 @@ class _HomePageState extends State<HomePage>
   String currentPath = "";
 
   bool isProcessing = false;
+  bool isDeleting = false;
 
   int totalFiles = 0;
   int processedFiles = 0;
@@ -175,17 +173,45 @@ class _HomePageState extends State<HomePage>
     }
   }
 
-  Future<void> deleteFolder(String path) async {
+  Future<void> deleteFolder(String path, String key) async {
     print("deleteFolder is called");
+    setState(() {
+      isDeleting = true;
+    });
     await db.deleteRecordByFilePath(path);
+    // decrypt images if encrypted
+    if (keys.contains(key)) {
+      for (int i = 0; i < encryptedImages.length; i++) {
+        final filePath = encryptedImages[i].path;
+        await compute(
+            unjumbleWrapper, {'in': filePath, 'out': filePath, 'key': key});
+        try {
+          await FileImage(File(filePath)).evict();
+        } catch (_) {}
+      }
+    }
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content:
+            Text('Deleted Folder: ${path.split(Platform.pathSeparator).last}'),
+        backgroundColor: Colors.redAccent,
+      ),
+    );
     // If a scan for this folder is running, cancel it
-    try { await _scanSubscription?.cancel(); } catch (_) {}
+    try {
+      await _scanSubscription?.cancel();
+    } catch (_) {}
     _scanSubscription = null;
-    try { _scanRp?.close(); } catch (_) {}
+    try {
+      _scanRp?.close();
+    } catch (_) {}
     _scanRp = null;
-    try { _scanIsolate?.kill(priority: Isolate.immediate); } catch (_) {}
+    try {
+      _scanIsolate?.kill(priority: Isolate.immediate);
+    } catch (_) {}
     _scanIsolate = null;
     setState(() {
+      isDeleting = false;
       // remove the entry at the same index from all parallel lists
       final idx = folderPaths.indexOf(path);
       if (idx >= 0) {
@@ -332,13 +358,17 @@ class _HomePageState extends State<HomePage>
       _scanSubscription = _scanRp!.listen((dynamic message) async {
         if (message is Map) {
           final type = message['type'];
-         if (type == 'total') {
-             setState(() => totalFiles = message['total'] as int);
+          if (type == 'total') {
+            setState(() => totalFiles = message['total'] as int);
           } else if (type == 'progress') {
             setState(() => processedFiles = message['processed'] as int);
           } else if (type == 'done') {
-            final enc = (message['encrypted'] as List).map((p) => File(p as String)).toList();
-            final orig = (message['original'] as List).map((p) => File(p as String)).toList();
+            final enc = (message['encrypted'] as List)
+                .map((p) => File(p as String))
+                .toList();
+            final orig = (message['original'] as List)
+                .map((p) => File(p as String))
+                .toList();
             setState(() {
               encryptedImages = enc;
               originalImages = orig;
@@ -352,11 +382,17 @@ class _HomePageState extends State<HomePage>
               processedFiles = totalFiles;
             });
             // cleanup this isolate's resources
-            try { await _scanSubscription?.cancel(); } catch (_) {}
+            try {
+              await _scanSubscription?.cancel();
+            } catch (_) {}
             _scanSubscription = null;
-            try { _scanRp?.close(); } catch (_) {}
+            try {
+              _scanRp?.close();
+            } catch (_) {}
             _scanRp = null;
-            try { _scanIsolate?.kill(priority: Isolate.immediate); } catch (_) {}
+            try {
+              _scanIsolate?.kill(priority: Isolate.immediate);
+            } catch (_) {}
             _scanIsolate = null;
           }
         }
@@ -525,58 +561,6 @@ class _HomePageState extends State<HomePage>
       );
     } finally {
       setState(() => isProcessing = false);
-    }
-  }
-
-  Future<void> encryptImage(File originalImage) async {
-    print("encryptImage is called");
-    // Actually encrypt the image in-place with currentKey
-    try {
-      jpe.jumbleImage(originalImage.path, originalImage.path, currentKey);
-      await loadImagesFromFolder(currentPath, currentBookmark, currentKey);
-
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-              'Encrypted ${originalImage.path.split(Platform.pathSeparator).last}'),
-          backgroundColor: Theme.of(context).colorScheme.secondary,
-          duration: const Duration(seconds: 2),
-        ),
-      );
-    } catch (e) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('Encryption failed: $e'),
-          backgroundColor: Colors.redAccent,
-          duration: const Duration(seconds: 2),
-        ),
-      );
-    }
-  }
-
-  Future<void> decryptImage(File encryptedImage) async {
-    print("decryptImage is called");
-    // Actually encrypt the image in-place with currentKey
-    try {
-      jpe.unjumbleImage(encryptedImage.path, encryptedImage.path, currentKey);
-      await loadImagesFromFolder(currentPath, currentBookmark, currentKey);
-
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-              'Decrypted ${encryptedImage.path.split(Platform.pathSeparator).last}'),
-          backgroundColor: Theme.of(context).colorScheme.secondary,
-          duration: const Duration(seconds: 2),
-        ),
-      );
-    } catch (e) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('Decryption failed: $e'),
-          backgroundColor: Colors.redAccent,
-          duration: const Duration(seconds: 2),
-        ),
-      );
     }
   }
 
@@ -843,7 +827,8 @@ class _HomePageState extends State<HomePage>
                             trailing: IconButton(
                               icon: const Icon(Icons.delete_forever_outlined,
                                   size: 20, color: Colors.red),
-                              onPressed: () => deleteFolder(currPath),
+                              onPressed: () =>
+                                  deleteFolder(currPath, currentKey),
                               tooltip: "Delete Path",
                             ),
                             onTap: () => loadImagesFromFolder(
@@ -982,8 +967,8 @@ class _HomePageState extends State<HomePage>
                             labelStyle:
                                 const TextStyle(fontWeight: FontWeight.w600),
                             tabs: [
-                              Tab(text: "Original Images"),
-                              Tab(text: "Encrypted Images"),
+                              Tab(text: "Original Images ${originalImages.isNotEmpty ? '(${originalImages.length})' : ''}"),
+                              Tab(text: "Encrypted Images ${encryptedImages.isNotEmpty ? '(${encryptedImages.length})' : ''}"),
                             ],
                           ),
                         ),
@@ -1019,7 +1004,7 @@ class _HomePageState extends State<HomePage>
               ),
             ],
           ),
-          if (isProcessing)
+          if (isProcessing || isDeleting)
             Container(
               color: Colors.black45,
               child: const Center(
