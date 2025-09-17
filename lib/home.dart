@@ -27,6 +27,7 @@ class _HomePageState extends State<HomePage>
   List<String> keys = [];
   List<File> originalImages = [];
   List<File> encryptedImages = [];
+  List<String> passwords = [];
 
   String folderName = "";
 
@@ -97,11 +98,13 @@ class _HomePageState extends State<HomePage>
     folderPaths.clear();
     bookmarkList.clear();
     keys.clear();
+    passwords.clear();
 
     for (final folder in folders) {
       final folderPath = folder['folderPath'] as String;
       final bookmark = folder['bookmark'] as String?;
       final key = folder['key'] as String?;
+      final password = folder['password'] as String?;
 
       String? finalPath = folderPath;
 
@@ -111,12 +114,12 @@ class _HomePageState extends State<HomePage>
 
           if (resolved is Uri) {
             finalPath = resolved.path; // get actual usable path
-            print("Resolved bookmark → $finalPath");
+            //print("Resolved bookmark → $finalPath");
           } else {
-            print("Unexpected type from resolveBookmark: $resolved");
+            //print("Unexpected type from resolveBookmark: $resolved");
           }
         } catch (e) {
-          print("Failed to resolve bookmark for $folderPath: $e");
+          //print("Failed to resolve bookmark for $folderPath: $e");
         }
       }
 
@@ -124,8 +127,9 @@ class _HomePageState extends State<HomePage>
       folderPaths.add(finalPath!);
       bookmarkList.add(bookmark ?? "");
       keys.add(key ?? "");
+      passwords.add(password ?? "");
 
-      print("Folder added to list: $finalPath");
+      //print("Folder added to list: $finalPath");
     }
 
     setState(() {}); // ensure UI updates
@@ -145,17 +149,48 @@ class _HomePageState extends State<HomePage>
         bookmark = await SecureBookmarks().bookmark(Directory(path));
       }
 
+      // Password functionalities
+      final TextEditingController _pwdController = TextEditingController();
+      final String? entered = await showDialog<String>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text('Set Folder Password (optional):'),
+          content: TextField(
+            controller: _pwdController,
+            obscureText: true,
+            autofocus: true,
+            decoration: const InputDecoration(
+              hintText: 'Leave empty for no password',
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop(""),
+              child: const Text('Skip'),
+            ),
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop(_pwdController.text),
+              child: const Text('Save'),
+            ),
+          ],
+        ),
+      );
+      String password = entered ?? "";
+      password = await compute(hashPasswordWrapper, {'password': password});
+
       if (!folderPaths.contains(path)) {
         setState(() {
           folderPaths.add(path);
           bookmarkList.add(bookmark);
           keys.add(key);
+          passwords.add(password);
         });
 
         await db.saveFolder(
           bookmark,
           folderPath: path,
           key: key,
+          password: password,
           encType: 1,
         );
 
@@ -218,6 +253,7 @@ class _HomePageState extends State<HomePage>
         folderPaths.removeAt(idx);
         if (bookmarkList.length > idx) bookmarkList.removeAt(idx);
         if (keys.length > idx) keys.removeAt(idx);
+        if (passwords.length > idx) passwords.removeAt(idx);
       } else {
         // fallback: remove by value if not found by index
         folderPaths.remove(path);
@@ -306,49 +342,6 @@ class _HomePageState extends State<HomePage>
         encryptedImages = [];
         imgCount = originalImages.length;
       });
-
-      // Spawn the isolate scanner and listen for progress messages
-      // final rp = ReceivePort();
-      // final isolate = await Isolate.spawn(
-      //   scanFolderIsolate,
-      //   {'sendPort': rp.sendPort, 'path': finalPath, 'exts': exts},
-      //   paused: false,
-      // );
-
-      // StreamSubscription? sub;
-      // sub = rp.listen((dynamic message) {
-      //   if (message is Map) {
-      //     final type = message['type'];
-      //     if (type == 'total') {
-      //       setState(() => totalFiles = message['total'] as int);
-      //     } else if (type == 'progress') {
-      //       setState(() => processedFiles = message['processed'] as int);
-      //     } else if (type == 'done') {
-      //       final enc = (message['encrypted'] as List)
-      //           .map((p) => File(p as String))
-      //           .toList();
-      //       final orig = (message['original'] as List)
-      //           .map((p) => File(p as String))
-      //           .toList();
-      //       setState(() {
-      //         encryptedImages = enc;
-      //         originalImages = orig;
-      //         imgCount = encryptedImages.length + originalImages.length;
-      //         folderName = finalPath.split(Platform.pathSeparator).last;
-      //         currentPath = finalPath;
-      //         isSelecting = false;
-      //         selectedImages.clear();
-      //         checking = false;
-      //         // ensure progress shows completion
-      //         processedFiles = totalFiles;
-      //       });
-      //       // cleanup
-      //       sub?.cancel();
-      //       rp.close();
-      //       isolate.kill(priority: Isolate.immediate);
-      //     }
-      //   }
-      // });
       _scanRp = ReceivePort();
       _scanIsolate = await Isolate.spawn(
         scanFolderIsolate,
@@ -445,6 +438,9 @@ class _HomePageState extends State<HomePage>
 
   Future<void> encryptSelectedImages(
       String path, String bookmark, String key) async {
+    final ok = await _verifyFolderPassword();
+    if (!ok) return;
+
     setState(() {
       isProcessing = true;
     });
@@ -482,6 +478,9 @@ class _HomePageState extends State<HomePage>
 
   Future<void> decryptSelectedImages(
       String path, String bookmark, String key) async {
+    final ok = await _verifyFolderPassword();
+    if (!ok) return;
+
     setState(() {
       isProcessing = true;
     });
@@ -516,11 +515,26 @@ class _HomePageState extends State<HomePage>
   }
 
   Future<void> showTempDecrypted(File file) async {
+    final ok = await _verifyFolderPassword();
+    if (!ok) return;
+
     setState(() => isProcessing = true);
     try {
+      String keyToUse = currentKey;
+      if (currentKey.isEmpty && currentPath.isNotEmpty) {
+        // try to find key from folder list
+        final idx = folderPaths.indexOf(currentPath);
+        if (idx >= 0 && keys.length > idx) {
+          keyToUse = keys[idx];
+        }
+      }
+      if (keyToUse.isEmpty) {
+        throw Exception('No encryption key available for this folder');
+      }
+      print("key: $keyToUse");
       // call compute wrapper that returns PNG bytes of the unjumbled image
       final Uint8List bytes = await compute(
-          unjumbleToMemoryWrapper, {'in': file.path, 'key': currentKey});
+          unjumbleToMemoryWrapper, {'in': file.path, 'key': keyToUse});
 
       // Show a dialog with the image (keeps it in memory only)
       await showDialog(
@@ -557,14 +571,60 @@ class _HomePageState extends State<HomePage>
       );
     } catch (e) {
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Preview failed: $e')),
+        SnackBar(content: Text('Preview failed: ${e.toString()}')),
       );
     } finally {
       setState(() => isProcessing = false);
     }
   }
 
-  void _onShowImage(File file) {
+  // Prompt for the folder password (if any) when accessing encrypted previews.
+  // Returns true when access is allowed.
+  Future<bool> _verifyFolderPassword() async {
+    // Only guard encrypted tab
+    if (_tabController.index != 1) return true;
+
+    // Find stored password for currentPath
+    final idx = folderPaths.indexOf(currentPath);
+    final stored = (idx >= 0 && passwords.length > idx) ? passwords[idx] : '';
+    if (stored.isEmpty) return true; // no password set
+
+    final TextEditingController ctrl = TextEditingController();
+    final String? entered = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Enter folder password'),
+        content: TextField(
+          controller: ctrl,
+          obscureText: true,
+          autofocus: true,
+          decoration: const InputDecoration(hintText: 'Password'),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(null),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(ctrl.text),
+            child: const Text('OK'),
+          ),
+        ],
+      ),
+    );
+
+    if (entered == null) return false; // cancelled
+    if (await compute(verifyPasswordWrapper, {'stored': stored, 'candidate': entered})) return true;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Incorrect password')),
+    );
+    return false;
+  }
+
+  void _onShowImage(File file) async {
+    final ok = await _verifyFolderPassword();
+    if (!ok) return;
+
     final images = _tabController.index == 1 ? encryptedImages : originalImages;
     final start = images.indexWhere((f) => f.path == file.path);
     if (start < 0) return;
@@ -967,8 +1027,12 @@ class _HomePageState extends State<HomePage>
                             labelStyle:
                                 const TextStyle(fontWeight: FontWeight.w600),
                             tabs: [
-                              Tab(text: "Original Images ${originalImages.isNotEmpty ? '(${originalImages.length})' : ''}"),
-                              Tab(text: "Encrypted Images ${encryptedImages.isNotEmpty ? '(${encryptedImages.length})' : ''}"),
+                              Tab(
+                                  text:
+                                      "Original Images ${originalImages.isNotEmpty ? '(${originalImages.length})' : ''}"),
+                              Tab(
+                                  text:
+                                      "Encrypted Images ${encryptedImages.isNotEmpty ? '(${encryptedImages.length})' : ''}"),
                             ],
                           ),
                         ),

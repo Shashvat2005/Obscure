@@ -136,6 +136,7 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
           bookmark,
           folderPath: path,
           key: key,
+          password: "", // default empty password
           encType: 1,
         );
 
@@ -433,7 +434,6 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
     }
   }
 
-
   void _onShowImage(File file) {
     final images = _tabController.index == 1 ? encryptedImages : originalImages;
     final start = images.indexWhere((f) => f.path == file.path);
@@ -449,8 +449,6 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
       fullscreenDialog: true,
     ));
   }
-
-
 
   Widget _buildImageGrid(List<File> imagesToShow, bool checking,
       {bool showEncryptButton = true}) {
@@ -501,7 +499,6 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
       },
     );
   }
-
 
   Widget _buildImageCard(File file, bool showEncryptButton, bool isSelected,
       {bool showDecryptButton = false}) {

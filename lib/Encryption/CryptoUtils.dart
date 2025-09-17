@@ -5,6 +5,7 @@ import 'dart:convert';
 import 'dart:typed_data';
 import 'package:image/image.dart' as img;
 import 'package:crypto/crypto.dart' as crypto;
+import 'package:bcrypt/bcrypt.dart';
 import 'dart:async';
 
 Future<void> jumbleWrapper(Map<String, String> args) async {
@@ -116,6 +117,31 @@ Future<void> scanFolderIsolate(Map msg) async {
   send.send({'type': 'done', 'encrypted': encrypted, 'original': original});
 }
 
+String hashPasswordToStore(String password) {
+  if (password.isEmpty) return '';
+  // gensalt default cost is fine; adjust with BCrypt.gensaltWithRounds(rounds)
+  return BCrypt.hashpw(password, BCrypt.gensalt());
+}
+
+bool verifyPassword(String stored, String candidate) {
+  if (stored.isEmpty) return candidate.isEmpty;
+  try {
+    return BCrypt.checkpw(candidate, stored);
+  } catch (_) {
+    return false;
+  }
+}
+
+Future<bool> verifyPasswordWrapper(Map args) async {
+  final stored = args['stored'] as String;
+  final candidate = args['candidate'] as String;
+  return verifyPassword(stored, candidate);
+}
+
+Future<String> hashPasswordWrapper(Map args) async {
+  final password = args['password'] as String;
+  return hashPasswordToStore(password);
+}
 
 class ImageCeaserEncryptor {
   static const markerR = 123;

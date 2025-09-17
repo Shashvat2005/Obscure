@@ -34,6 +34,7 @@ class DatabaseHelper {
         folderPath TEXT NOT NULL UNIQUE,
         bookmark TEXT,
         key TEXT NOT NULL,
+        password TEXT NOT NULL,
         enc_type INTEGER NOT NULL,
         no_of_enc INTEGER NOT NULL,
         no_of_org INTEGER NOT NULL,
@@ -90,7 +91,7 @@ class DatabaseHelper {
   }
 
   // Folder related functions
-  Future<int> saveFolder(String bookmark, {required String folderPath, required String key, required int encType}) async {
+  Future<int> saveFolder(String bookmark, {required String folderPath, required String key, required int encType, required String password}) async {
     final dbClient = await db;
 
     // Count how many images are in this folder
@@ -114,6 +115,7 @@ class DatabaseHelper {
       'folderPath': folderPath,
       'bookmark': bookmark,
       'key': key,
+      'password': password,
       'enc_type': encType,
       'no_of_enc': 0, // initially 0 encrypted
       'no_of_org': noOfOrg,
