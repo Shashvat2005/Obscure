@@ -1,4 +1,6 @@
+import 'dart:async';
 import 'dart:io';
+import 'dart:isolate';
 import 'package:flutter/foundation.dart' show compute, Uint8List;
 import 'dart:math';
 import 'package:flutter/material.dart';
@@ -15,7 +17,8 @@ class HomePage extends StatefulWidget {
   State<HomePage> createState() => _HomePageState();
 }
 
-class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin {
+class _HomePageState extends State<HomePage>
+    with SingleTickerProviderStateMixin {
   final db = DatabaseHelper();
   final jpe = JumblePixels();
 
@@ -24,14 +27,13 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
   List<String> keys = [];
   List<File> originalImages = [];
   List<File> encryptedImages = [];
+  List<String> passwords = [];
 
   String folderName = "";
 
   late TabController _tabController;
 
   int imgCount = 0;
-  int orgImages = 0;
-  int encImages = 0;
 
   bool checking = false;
 
@@ -40,6 +42,14 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
   String currentPath = "";
 
   bool isProcessing = false;
+  bool isDeleting = false;
+
+  int totalFiles = 0;
+  int processedFiles = 0;
+
+  ReceivePort? _scanRp;
+  Isolate? _scanIsolate;
+  StreamSubscription? _scanSubscription;
 
   String getRandomString(int length) {
     String chars =
@@ -68,6 +78,16 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
 
   @override
   void dispose() {
+    // clean up any running scanner isolate
+    try {
+      _scanSubscription?.cancel();
+    } catch (_) {}
+    try {
+      _scanRp?.close();
+    } catch (_) {}
+    try {
+      _scanIsolate?.kill(priority: Isolate.immediate);
+    } catch (_) {}
     _tabController.dispose();
     super.dispose();
   }
@@ -77,11 +97,14 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
     final folders = await db.getAllRecords();
     folderPaths.clear();
     bookmarkList.clear();
+    keys.clear();
+    passwords.clear();
 
     for (final folder in folders) {
       final folderPath = folder['folderPath'] as String;
       final bookmark = folder['bookmark'] as String?;
       final key = folder['key'] as String?;
+      final password = folder['password'] as String?;
 
       String? finalPath = folderPath;
 
@@ -91,12 +114,12 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
 
           if (resolved is Uri) {
             finalPath = resolved.path; // get actual usable path
-            print("Resolved bookmark → $finalPath");
+            //print("Resolved bookmark → $finalPath");
           } else {
-            print("Unexpected type from resolveBookmark: $resolved");
+            //print("Unexpected type from resolveBookmark: $resolved");
           }
         } catch (e) {
-          print("Failed to resolve bookmark for $folderPath: $e");
+          //print("Failed to resolve bookmark for $folderPath: $e");
         }
       }
 
@@ -104,8 +127,9 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
       folderPaths.add(finalPath!);
       bookmarkList.add(bookmark ?? "");
       keys.add(key ?? "");
+      passwords.add(password ?? "");
 
-      print("Folder added to list: $finalPath");
+      //print("Folder added to list: $finalPath");
     }
 
     setState(() {}); // ensure UI updates
@@ -125,18 +149,48 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
         bookmark = await SecureBookmarks().bookmark(Directory(path));
       }
 
+      // Password functionalities
+      final TextEditingController _pwdController = TextEditingController();
+      final String? entered = await showDialog<String>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text('Set Folder Password (optional):'),
+          content: TextField(
+            controller: _pwdController,
+            obscureText: true,
+            autofocus: true,
+            decoration: const InputDecoration(
+              hintText: 'Leave empty for no password',
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop(""),
+              child: const Text('Skip'),
+            ),
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop(_pwdController.text),
+              child: const Text('Save'),
+            ),
+          ],
+        ),
+      );
+      String password = entered ?? "";
+      password = await compute(hashPasswordWrapper, {'password': password});
+
       if (!folderPaths.contains(path)) {
         setState(() {
           folderPaths.add(path);
           bookmarkList.add(bookmark);
           keys.add(key);
+          passwords.add(password);
         });
 
         await db.saveFolder(
           bookmark,
           folderPath: path,
           key: key,
-          password: "", // default empty password
+          password: password,
           encType: 1,
         );
 
@@ -154,24 +208,99 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
     }
   }
 
-  Future<void> deleteFolder(String path) async {
+  Future<void> deleteFolder(String path, String key) async {
     print("deleteFolder is called");
-    await db.deleteRecordByFilePath(path);
     setState(() {
-      folderPaths.remove(path);
-      encryptedImages = [];
-      originalImages = [];
+      isDeleting = true;
+    });
+    await db.deleteRecordByFilePath(path);
+    // decrypt images if encrypted
+    if (keys.contains(key)) {
+      for (int i = 0; i < encryptedImages.length; i++) {
+        final filePath = encryptedImages[i].path;
+        await compute(
+            unjumbleWrapper, {'in': filePath, 'out': filePath, 'key': key});
+        try {
+          await FileImage(File(filePath)).evict();
+        } catch (_) {}
+      }
+    }
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content:
+            Text('Deleted Folder: ${path.split(Platform.pathSeparator).last}'),
+        backgroundColor: Colors.redAccent,
+      ),
+    );
+    // If a scan for this folder is running, cancel it
+    try {
+      await _scanSubscription?.cancel();
+    } catch (_) {}
+    _scanSubscription = null;
+    try {
+      _scanRp?.close();
+    } catch (_) {}
+    _scanRp = null;
+    try {
+      _scanIsolate?.kill(priority: Isolate.immediate);
+    } catch (_) {}
+    _scanIsolate = null;
+    setState(() {
+      isDeleting = false;
+      // remove the entry at the same index from all parallel lists
+      final idx = folderPaths.indexOf(path);
+      if (idx >= 0) {
+        folderPaths.removeAt(idx);
+        if (bookmarkList.length > idx) bookmarkList.removeAt(idx);
+        if (keys.length > idx) keys.removeAt(idx);
+        if (passwords.length > idx) passwords.removeAt(idx);
+      } else {
+        // fallback: remove by value if not found by index
+        folderPaths.remove(path);
+      }
+      // if we deleted the currently loaded folder, clear view state
+      if (currentPath == path) {
+        currentPath = "";
+        currentBookmark = "";
+        currentKey = "";
+        folderName = "";
+        encryptedImages = [];
+        originalImages = [];
+        imgCount = 0;
+      }
     });
   }
 
   Future<void> loadImagesFromFolder(
       String path, String bookmark, String key) async {
     print("loadImagesFromFolder is called");
+
+    // Cancel any previous running scan to avoid its "done" overwriting this load
+    try {
+      await _scanSubscription?.cancel();
+    } catch (_) {}
+    _scanSubscription = null;
+    try {
+      _scanRp?.close();
+    } catch (_) {}
+    _scanRp = null;
+    try {
+      _scanIsolate?.kill(priority: Isolate.immediate);
+    } catch (_) {}
+    _scanIsolate = null;
+
     setState(() {
       currentKey = key;
+      currentBookmark = bookmark;
+      currentPath = path;
+      folderName = path.split(Platform.pathSeparator).last; // show immediately
       checking = true;
       originalImages = [];
       encryptedImages = [];
+      isSelecting = false;
+      selectedImages.clear();
+      totalFiles = 0;
+      processedFiles = 0;
     });
 
     try {
@@ -200,24 +329,66 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
 
       final exts = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.heic'];
 
-      // Offload expensive scanning + decoding to a background isolate
-      final Map<String, List<String>> scanned = await compute(
-        scanFolderWrapper,
-        {'path': finalPath, 'exts': exts},
+      // quick file list shown immediately (optional)
+      final filesQuick = dir
+          .listSync()
+          .whereType<File>()
+          .where((f) => exts.any((e) => f.path.toLowerCase().endsWith(e)))
+          .toList()
+        ..sort((a, b) => a.path.compareTo(b.path));
+
+      setState(() {
+        originalImages = filesQuick;
+        encryptedImages = [];
+        imgCount = originalImages.length;
+      });
+      _scanRp = ReceivePort();
+      _scanIsolate = await Isolate.spawn(
+        scanFolderIsolate,
+        {'sendPort': _scanRp!.sendPort, 'path': finalPath, 'exts': exts},
       );
 
-      // Convert to File lists and update state once
-      setState(() {
-        encryptedImages =
-            (scanned['encrypted'] ?? []).map((p) => File(p)).toList();
-        originalImages =
-            (scanned['original'] ?? []).map((p) => File(p)).toList();
-        imgCount = encryptedImages.length + originalImages.length;
-        folderName = finalPath.split(Platform.pathSeparator).last;
-        currentPath = finalPath; // mark currently loaded folder
-        isSelecting = false;
-        selectedImages.clear();
-        checking = false;
+      _scanSubscription = _scanRp!.listen((dynamic message) async {
+        if (message is Map) {
+          final type = message['type'];
+          if (type == 'total') {
+            setState(() => totalFiles = message['total'] as int);
+          } else if (type == 'progress') {
+            setState(() => processedFiles = message['processed'] as int);
+          } else if (type == 'done') {
+            final enc = (message['encrypted'] as List)
+                .map((p) => File(p as String))
+                .toList();
+            final orig = (message['original'] as List)
+                .map((p) => File(p as String))
+                .toList();
+            setState(() {
+              encryptedImages = enc;
+              originalImages = orig;
+              imgCount = encryptedImages.length + originalImages.length;
+              folderName = finalPath.split(Platform.pathSeparator).last;
+              currentPath = finalPath;
+              isSelecting = false;
+              selectedImages.clear();
+              checking = false;
+              // ensure progress shows completion
+              processedFiles = totalFiles;
+            });
+            // cleanup this isolate's resources
+            try {
+              await _scanSubscription?.cancel();
+            } catch (_) {}
+            _scanSubscription = null;
+            try {
+              _scanRp?.close();
+            } catch (_) {}
+            _scanRp = null;
+            try {
+              _scanIsolate?.kill(priority: Isolate.immediate);
+            } catch (_) {}
+            _scanIsolate = null;
+          }
+        }
       });
     } catch (e) {
       setState(() {
@@ -225,11 +396,13 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
         encryptedImages = [];
         imgCount = 0;
         checking = false;
+        totalFiles = 0;
+        processedFiles = 0;
       });
       print("Error loading images: $e");
     }
   }
-  
+
   void toggleSelection(File image) {
     setState(() {
       if (selectedImages.contains(image)) {
@@ -265,6 +438,9 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
 
   Future<void> encryptSelectedImages(
       String path, String bookmark, String key) async {
+    final ok = await _verifyFolderPassword();
+    if (!ok) return;
+
     setState(() {
       isProcessing = true;
     });
@@ -276,9 +452,10 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
       if (!encryptedImages.contains(image)) {
         // await jpe.jumbleImage(image.path, image.path, key);
         // await FileImage(File(image.path)).evict();
-        await compute(jumbleWrapper, {'in': image.path, 'out': image.path, 'key': key});
+        await compute(
+            jumbleWrapper, {'in': image.path, 'out': image.path, 'key': key});
         await FileImage(File(image.path)).evict();
-        
+
         print("Encrypted ${image.path.split(Platform.pathSeparator).last}");
       }
     }
@@ -301,6 +478,9 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
 
   Future<void> decryptSelectedImages(
       String path, String bookmark, String key) async {
+    final ok = await _verifyFolderPassword();
+    if (!ok) return;
+
     setState(() {
       isProcessing = true;
     });
@@ -312,7 +492,8 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
         // await jpe.unjumbleImage(image.path, image.path, key);
         // await FileImage(File(image.path)).evict();
 
-        await compute(unjumbleWrapper, {'in': image.path, 'out': image.path, 'key': key});
+        await compute(
+            unjumbleWrapper, {'in': image.path, 'out': image.path, 'key': key});
         await FileImage(File(image.path)).evict();
         print("Decrypted ${image.path.split(Platform.pathSeparator).last}");
       }
@@ -334,11 +515,26 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
   }
 
   Future<void> showTempDecrypted(File file) async {
+    final ok = await _verifyFolderPassword();
+    if (!ok) return;
+
     setState(() => isProcessing = true);
     try {
+      String keyToUse = currentKey;
+      if (currentKey.isEmpty && currentPath.isNotEmpty) {
+        // try to find key from folder list
+        final idx = folderPaths.indexOf(currentPath);
+        if (idx >= 0 && keys.length > idx) {
+          keyToUse = keys[idx];
+        }
+      }
+      if (keyToUse.isEmpty) {
+        throw Exception('No encryption key available for this folder');
+      }
+      print("key: $keyToUse");
       // call compute wrapper that returns PNG bytes of the unjumbled image
       final Uint8List bytes = await compute(
-          unjumbleToMemoryWrapper, {'in': file.path, 'key': currentKey});
+          unjumbleToMemoryWrapper, {'in': file.path, 'key': keyToUse});
 
       // Show a dialog with the image (keeps it in memory only)
       await showDialog(
@@ -375,66 +571,60 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
       );
     } catch (e) {
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Preview failed: $e')),
+        SnackBar(content: Text('Preview failed: ${e.toString()}')),
       );
     } finally {
       setState(() => isProcessing = false);
     }
   }
 
-  Future<void> encryptImage(File originalImage) async {
-    print("encryptImage is called");
-    // Actually encrypt the image in-place with currentKey
-    try {
-      jpe.jumbleImage(originalImage.path, originalImage.path, currentKey);
-      await loadImagesFromFolder(currentPath, currentBookmark, currentKey);
+  // Prompt for the folder password (if any) when accessing encrypted previews.
+  // Returns true when access is allowed.
+  Future<bool> _verifyFolderPassword() async {
+    // Only guard encrypted tab
+    if (_tabController.index != 1) return true;
 
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-              'Encrypted ${originalImage.path.split(Platform.pathSeparator).last}'),
-          backgroundColor: Theme.of(context).colorScheme.secondary,
-          duration: const Duration(seconds: 2),
+    // Find stored password for currentPath
+    final idx = folderPaths.indexOf(currentPath);
+    final stored = (idx >= 0 && passwords.length > idx) ? passwords[idx] : '';
+    if (stored.isEmpty) return true; // no password set
+
+    final TextEditingController ctrl = TextEditingController();
+    final String? entered = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Enter folder password'),
+        content: TextField(
+          controller: ctrl,
+          obscureText: true,
+          autofocus: true,
+          decoration: const InputDecoration(hintText: 'Password'),
         ),
-      );
-    } catch (e) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('Encryption failed: $e'),
-          backgroundColor: Colors.redAccent,
-          duration: const Duration(seconds: 2),
-        ),
-      );
-    }
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(null),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(ctrl.text),
+            child: const Text('OK'),
+          ),
+        ],
+      ),
+    );
+
+    if (entered == null) return false; // cancelled
+    if (await compute(verifyPasswordWrapper, {'stored': stored, 'candidate': entered})) return true;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Incorrect password')),
+    );
+    return false;
   }
 
-  Future<void> decryptImage(File encryptedImage) async {
-    print("decryptImage is called");
-    // Actually encrypt the image in-place with currentKey
-    try {
-      jpe.unjumbleImage(encryptedImage.path, encryptedImage.path, currentKey);
-      await loadImagesFromFolder(currentPath, currentBookmark, currentKey);
+  void _onShowImage(File file) async {
+    final ok = await _verifyFolderPassword();
+    if (!ok) return;
 
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-              'Decrypted ${encryptedImage.path.split(Platform.pathSeparator).last}'),
-          backgroundColor: Theme.of(context).colorScheme.secondary,
-          duration: const Duration(seconds: 2),
-        ),
-      );
-    } catch (e) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('Decryption failed: $e'),
-          backgroundColor: Colors.redAccent,
-          duration: const Duration(seconds: 2),
-        ),
-      );
-    }
-  }
-
-  void _onShowImage(File file) {
     final images = _tabController.index == 1 ? encryptedImages : originalImages;
     final start = images.indexWhere((f) => f.path == file.path);
     if (start < 0) return;
@@ -572,9 +762,12 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
                 children: [
                   ElevatedButton(
                     style: ElevatedButton.styleFrom(
-                        backgroundColor: Colors.black54, padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6)),
+                        backgroundColor: Colors.black54,
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 12, vertical: 6)),
                     onPressed: () => showTempDecrypted(file),
-                    child: const Text('Show', style: TextStyle(color: Colors.white)),
+                    child: const Text('Show',
+                        style: TextStyle(color: Colors.white)),
                   ),
                 ],
               ),
@@ -629,7 +822,7 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
                     ),
                   ],
                 ),
-          
+
                 child: Column(
                   children: [
                     Padding(
@@ -655,23 +848,24 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
                         ],
                       ),
                     ),
-          
+
                     const Divider(height: 1),
-          
+
                     const SizedBox(height: 2),
-          
+
                     // Folders List
                     Expanded(
                       child: ListView.builder(
                         itemCount: folderPaths.length,
                         itemBuilder: (context, index) {
-                          currentPath = folderPaths[index];
+                          final currPath = folderPaths[index];
                           final name =
-                              currentPath.split(Platform.pathSeparator).last;
-                          currentBookmark = bookmarkList[index];
+                              currPath.split(Platform.pathSeparator).last;
+                          final currBookmark = bookmarkList[index];
                           final key = keys[index];
                           return ListTile(
-                            leading: const Icon(Icons.folder, color: Colors.amber),
+                            leading:
+                                const Icon(Icons.folder, color: Colors.amber),
                             title: Text(
                               name,
                               overflow: TextOverflow.ellipsis,
@@ -685,19 +879,20 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
                               ),
                             ),
                             subtitle: Text(
-                              currentPath,
+                              currPath,
                               overflow: TextOverflow.ellipsis,
-                              style:
-                                  TextStyle(fontSize: 12, color: Colors.grey[600]),
+                              style: TextStyle(
+                                  fontSize: 12, color: Colors.grey[600]),
                             ),
                             trailing: IconButton(
                               icon: const Icon(Icons.delete_forever_outlined,
                                   size: 20, color: Colors.red),
-                              onPressed: () => deleteFolder(currentPath),
+                              onPressed: () =>
+                                  deleteFolder(currPath, currentKey),
                               tooltip: "Delete Path",
                             ),
                             onTap: () => loadImagesFromFolder(
-                                currentPath, currentBookmark, key),
+                                currPath, currBookmark, key),
                             shape: RoundedRectangleBorder(
                               borderRadius: BorderRadius.circular(8),
                             ),
@@ -710,7 +905,7 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
                   ],
                 ),
               ),
-          
+
               // MAIN CONTENT AREA
               Expanded(
                 child: Container(
@@ -766,24 +961,29 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
                               ),
                             // Single "Show" button — shows the first image of the current tab
                             if (!isSelecting &&
-                                ((_tabController.index == 0 && originalImages.isNotEmpty) ||
-                                    (_tabController.index == 1 && encryptedImages.isNotEmpty)))
+                                ((_tabController.index == 0 &&
+                                        originalImages.isNotEmpty) ||
+                                    (_tabController.index == 1 &&
+                                        encryptedImages.isNotEmpty)))
                               TextButton(
                                 onPressed: () {
-                                  final images = _tabController.index == 1 ? encryptedImages : originalImages;
-                                  if (images.isNotEmpty) _onShowImage(images.first);
+                                  final images = _tabController.index == 1
+                                      ? encryptedImages
+                                      : originalImages;
+                                  if (images.isNotEmpty)
+                                    _onShowImage(images.first);
                                 },
                                 child: const Text("Show"),
                               ),
-                             if (isSelecting)
-                               TextButton(
-                                 onPressed: clearSelection,
-                                 child: Text("Cancel"),
-                               ),
+                            if (isSelecting)
+                              TextButton(
+                                onPressed: clearSelection,
+                                child: Text("Cancel"),
+                              ),
                           ],
                         ),
                       ),
-                  
+
                       // Selection mode info bar (finalized)
                       if (isSelecting)
                         Container(
@@ -807,7 +1007,7 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
                             ],
                           ),
                         ),
-                  
+
                       // Tabs
                       Container(
                         decoration: BoxDecoration(
@@ -820,27 +1020,24 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
                             ),
                           ],
                         ),
-                        // child: TabBar(
-                        //   controller: _tabController,
-                        //   labelStyle: const TextStyle(fontWeight: FontWeight.w600),
-                        //   tabs: [
-                        //     Tab(text: "Original Images"),
-                        //     Tab(text: "Encrypted Images"),
-                        //   ],
-                        // ),
                         child: IgnorePointer(
                           ignoring: isSelecting,
                           child: TabBar(
                             controller: _tabController,
-                            labelStyle: const TextStyle(fontWeight: FontWeight.w600),
+                            labelStyle:
+                                const TextStyle(fontWeight: FontWeight.w600),
                             tabs: [
-                              Tab(text: "Original Images"),
-                              Tab(text: "Encrypted Images"),
+                              Tab(
+                                  text:
+                                      "Original Images ${originalImages.isNotEmpty ? '(${originalImages.length})' : ''}"),
+                              Tab(
+                                  text:
+                                      "Encrypted Images ${encryptedImages.isNotEmpty ? '(${encryptedImages.length})' : ''}"),
                             ],
                           ),
                         ),
                       ),
-                  
+
                       // Tab content
                       Expanded(
                         child: TabBarView(
@@ -855,7 +1052,7 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
                               checking,
                               showEncryptButton: true,
                             ),
-                  
+
                             // Encrypted Images Tab
                             _buildImageGrid(
                               encryptedImages,
@@ -865,15 +1062,13 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
                           ],
                         ),
                       ),
-                      
                     ],
                   ),
                 ),
               ),
             ],
           ),
-        
-          if (isProcessing)
+          if (isProcessing || isDeleting)
             Container(
               color: Colors.black45,
               child: const Center(
@@ -881,17 +1076,14 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
                   mainAxisAlignment: MainAxisAlignment.center,
                   crossAxisAlignment: CrossAxisAlignment.center,
                   children: [
-                    Text(
-                      "Processing...", 
-                      style: TextStyle(color: Colors.white, fontSize: 18)
-                    ),
+                    Text("Processing...",
+                        style: TextStyle(color: Colors.white, fontSize: 18)),
                     SizedBox(height: 16),
                     CircularProgressIndicator(),
                   ],
                 ),
               ),
             ),
-        
         ],
       ),
       // Bottom action button when in selection mode

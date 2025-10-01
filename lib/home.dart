@@ -5,10 +5,12 @@ import 'package:flutter/foundation.dart' show compute, Uint8List;
 import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:macos_secure_bookmarks/macos_secure_bookmarks.dart';
+import 'package:obscura/Components/PasswordField.dart';
 import 'package:obscura/Components/fullScreenImg.dart';
 import 'package:obscura/Database/dbHelper.dart';
 import 'package:obscura/Encryption/CryptoUtils.dart';
 import 'package:file_selector/file_selector.dart';
+import 'package:obscura/settings.dart';
 
 class HomePage extends StatefulWidget {
   const HomePage({super.key});
@@ -155,13 +157,9 @@ class _HomePageState extends State<HomePage>
         context: context,
         builder: (ctx) => AlertDialog(
           title: const Text('Set Folder Password (optional):'),
-          content: TextField(
+          content: PasswordField(
             controller: _pwdController,
-            obscureText: true,
-            autofocus: true,
-            decoration: const InputDecoration(
-              hintText: 'Leave empty for no password',
-            ),
+            hintText: 'Leave empty for no password',
           ),
           actions: [
             TextButton(
@@ -228,7 +226,7 @@ class _HomePageState extends State<HomePage>
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content:
-            Text('Deleted Folder: ${path.split(Platform.pathSeparator).last}'),
+            Text('Removed Folder: ${path.split(Platform.pathSeparator).last}'),
         backgroundColor: Colors.redAccent,
       ),
     );
@@ -593,12 +591,10 @@ class _HomePageState extends State<HomePage>
     final String? entered = await showDialog<String>(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: const Text('Enter folder password'),
-        content: TextField(
+        title: const Text('Enter Password'),
+        content: PasswordField(
           controller: ctrl,
-          obscureText: true,
-          autofocus: true,
-          decoration: const InputDecoration(hintText: 'Password'),
+          hintText: 'Password',
         ),
         actions: [
           TextButton(
@@ -790,6 +786,9 @@ class _HomePageState extends State<HomePage>
             for (var i = 0; i < data.length; i++) {
               print(data[i]);
             }
+            Navigator.of(context).push(MaterialPageRoute(
+              builder: (context) => const Settings(),
+            ));
           },
           icon: Icon(Icons.settings),
         ),
@@ -889,7 +888,7 @@ class _HomePageState extends State<HomePage>
                                   size: 20, color: Colors.red),
                               onPressed: () =>
                                   deleteFolder(currPath, currentKey),
-                              tooltip: "Delete Path",
+                              tooltip: "Delete Folder",
                             ),
                             onTap: () => loadImagesFromFolder(
                                 currPath, currBookmark, key),
@@ -1011,7 +1010,7 @@ class _HomePageState extends State<HomePage>
                       // Tabs
                       Container(
                         decoration: BoxDecoration(
-                          color: Colors.white,
+                          color: Theme.of(context).colorScheme.tertiary,
                           boxShadow: [
                             BoxShadow(
                               color: Colors.grey.withOpacity(0.1),
@@ -1024,15 +1023,14 @@ class _HomePageState extends State<HomePage>
                           ignoring: isSelecting,
                           child: TabBar(
                             controller: _tabController,
-                            labelStyle:
-                                const TextStyle(fontWeight: FontWeight.w600),
+                            labelStyle: const TextStyle(fontWeight: FontWeight.w600),
                             tabs: [
                               Tab(
-                                  text:
-                                      "Original Images ${originalImages.isNotEmpty ? '(${originalImages.length})' : ''}"),
+                                  text:"Original Images ${originalImages.isNotEmpty ? '(${originalImages.length})' : ''}",
+                              ),
                               Tab(
-                                  text:
-                                      "Encrypted Images ${encryptedImages.isNotEmpty ? '(${encryptedImages.length})' : ''}"),
+                                  text:"Encrypted Images ${encryptedImages.isNotEmpty ? '(${encryptedImages.length})' : ''}"
+                              ),
                             ],
                           ),
                         ),

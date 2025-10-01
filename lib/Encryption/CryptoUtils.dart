@@ -33,38 +33,53 @@ Future<Uint8List> unjumbleToMemoryWrapper(Map<String, String> args) async {
 
 // args: {'path': String, 'exts': List<String>}
 Future<Map<String, List<String>>> scanFolderWrapper(Map args) async {
-  final String path = args['path'] as String;
-  final List<String> exts = List<String>.from(args['exts'] as List);
-  final dir = Directory(path);
-  final result = <String, List<String>>{
+  final String path = args['path'] as String? ?? '';
+  final List<String> exts =
+      (args['exts'] is List) ? List<String>.from(args['exts']) : <String>[];
+  final Map<String, List<String>> result = {
     'encrypted': <String>[],
     'original': <String>[],
   };
 
+  if (path.isEmpty) return result;
+
+  final dir = Directory(path);
   if (!await dir.exists()) return result;
 
+  // collect files matching extensions
   final files = dir
       .listSync()
       .whereType<File>()
-      .where((f) => exts.any((e) => f.path.toLowerCase().endsWith(e)))
+      .where((f) => exts.isEmpty
+          ? true
+          : exts.any((e) => f.path.toLowerCase().endsWith(e.toLowerCase())))
       .toList()
     ..sort((a, b) => a.path.compareTo(b.path));
 
   final j = JumblePixels();
   for (final f in files) {
     try {
-      final isEnc = await j.isJumbled(f);
+      final bool isEnc = await j.isJumbled(f);
       if (isEnc) {
         result['encrypted']!.add(f.path);
       } else {
         result['original']!.add(f.path);
       }
     } catch (e) {
-      // skip unreadable/corrupt files
-      // optionally collect errors in another list if you want to report them
+      // skip unreadable / problematic files
+      // optionally log: print('scanFolderWrapper: skip ${f.path}: $e');
     }
   }
+
   return result;
+}
+
+// New: returns counts so compute(...) has the expected signature
+Future<Map<String, int>> scanFolderCountsWrapper(Map args) async {
+  final Map<String, List<String>> res = await scanFolderWrapper(args);
+  final orig = res['original'] ?? <String>[];
+  final enc = res['encrypted'] ?? <String>[];
+  return {'original': orig.length, 'encrypted': enc.length};
 }
 
 // Spawned in a separate isolate. Sends progress messages to the provided SendPort.
@@ -519,5 +534,3 @@ class JumblePixels {
     return Uint8List.fromList(png);
   }
 }
-
-
